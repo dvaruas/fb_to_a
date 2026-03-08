@@ -1,8 +1,7 @@
 import argparse
 import logging
 
-from source.scalable.config import SourceScalableCapitalConfig
-from source.scalable.source import SourceScalableCapital
+import source.scalable
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -16,7 +15,7 @@ if __name__ == "__main__":
         "-v",
         "--verbose",
         action="store_true",
-        help="Enable verbose logging",
+        help="enable verbose logging",
     )
 
     args = parser.parse_args()
@@ -27,6 +26,6 @@ if __name__ == "__main__":
         format="%(asctime)s - %(levelname)s - %(name)s:%(funcName)s - %(message)s",
     )
 
-    config = SourceScalableCapitalConfig.from_json(args.config)
+    config = source.scalable.Config.from_json(args.config)
 
-    SourceScalableCapital(config).fetch_and_save()
+    source.scalable.Orchestrator(config).fetch_and_save()

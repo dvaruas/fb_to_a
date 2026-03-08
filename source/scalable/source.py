@@ -2,11 +2,15 @@ import json
 import logging
 import os
 import shutil
-from typing import Optional
+from typing import Any, Iterator, List, Optional
 
 import requests
 
-from source.scalable.config import SourceScalableCapitalConfig
+from source.scalable.config import Config
+from source.scalable.models import (
+    TransactionDetailModel,
+    TransactionsPageModel,
+)
 from utils.with_duration import run_with_duration
 
 transactions_page_size = 200
@@ -14,133 +18,174 @@ transactions_page_size = 200
 _module_logger = logging.getLogger(__name__)
 
 
-class SourceScalableCapital:
-    def __init__(self, config: SourceScalableCapitalConfig):
-        self.config = config
-        self.logger = _module_logger
-
-    def fetch_and_save(self):
-        # transactions information
-        page_number = -1
-        cursor_next: Optional[str] = None
-
-        while True:
-            page_number += 1
-
-            page = ScalableCapitalSecuritiesTransactionsPage(
-                page_number=page_number,
-                cursor=cursor_next,
-                config=self.config,
-                ignore_previous=True if page_number == 0 else False,
-            )
-            try:
-                cursor_next = page.fetch()
-            except Exception as e:
-                self.logger.error(
-                    f"error fetching transactions page {page_number}: {e}"
-                )
-                raise
-
-            if page_number == 0:
-                # for the first page, do a diff check to see if there have been any new transactions since last fetch
-                has_diff = page.has_diff_with_previous()
-                if not has_diff:
-                    self.logger.info(
-                        "no new transactions since last fetch, nothing more to do for this step"
-                    )
-                    break
-                else:
-                    # If the first page is different (or no previous file), then changes detected
-                    self.logger.info("changes detected or no previous data")
-                    transactions_dir = os.path.dirname(page.file_path)
-                    if os.path.exists(transactions_dir):
-                        self.logger.info(
-                            f"clearing old transaction files from: {transactions_dir}"
-                        )
-                        shutil.rmtree(transactions_dir)
-
-            try:
-                page.save()
-            except Exception as e:
-                self.logger.error(f"error saving transactions page {page_number}: {e}")
-                raise
-
-            # page stats
-            page.logger.info(page.stats())
-
-            if cursor_next == None:
-                break
-
-        # fetch all transaction included in all the pages
-        page_number = -1
-        while True:
-            page_number += 1
-
-            page = ScalableCapitalSecuritiesTransactionsPage(
-                page_number=page_number,
-                cursor=cursor_next,
-                config=self.config,
-            )
-            if page.fetch_response == None:
-                break
-
-            for transaction_id in page.get_transaction_ids():
-                transaction = ScalableCapitalSecuritiesTransaction(
-                    transaction_id=transaction_id,
-                    config=self.config,
-                )
-                try:
-                    transaction.fetch()
-                except Exception as e:
-                    self.logger.error(
-                        f"error fetching transaction {transaction_id}: {e}"
-                    )
-                    raise
-                try:
-                    transaction.save()
-                except Exception as e:
-                    self.logger.error(f"error saving transaction {transaction_id}: {e}")
-                    raise
-
-                # transaction stats
-                transaction.logger.info(transaction.stats())
-
-
-class ScalableCapitalSecuritiesTransactionsPageLoggerAdapter(logging.LoggerAdapter):
+class _TransactionLoggerAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
-        return f"[transactions {self.extra['page_no']}] {msg}", kwargs
+        transaction_id = (
+            self.extra["transaction_id"] if self.extra is not None else "UNKNOWN"
+        )
+        return f"[txn {transaction_id}] {msg}", kwargs
 
 
-class ScalableCapitalSecuritiesTransactionsPage:
+class _Transaction:
+    transaction_id: str
+    config: Config
+    logger: logging.LoggerAdapter
+    data: Optional[TransactionDetailModel]
+    raw_data: Optional[Any]
+    fetch_duration: float
+    save_duration: float
+
+    def __init__(
+        self,
+        transaction_id: str,
+        config: Config,
+        ignore_previous: bool = False,
+    ):
+        self.transaction_id = transaction_id
+        self.config = config
+        self.logger = _TransactionLoggerAdapter(
+            logger=_module_logger,
+            extra={
+                "transaction_id": (
+                    transaction_id
+                    if len(transaction_id) <= 13
+                    else f"{transaction_id[:10]}...{transaction_id[-3:]}"
+                )
+            },
+        )
+        self.data = None
+        self.raw_data = None
+        self.fetch_duration = 0.0
+        self.save_duration = 0.0
+
+        if not ignore_previous:
+            self.__load_cached_data()
+
+    def get_file_path(self) -> str:
+        return os.path.join(
+            self.config.output_path,
+            "data_points",
+            f"txn_{self.transaction_id}.json",
+        )
+
+    def __load_cached_data(self) -> None:
+        file_path = self.get_file_path()
+        if not os.path.exists(file_path):
+            return
+        with open(file_path, "r") as fr:
+            self.raw_data = json.load(fr)
+            self.data = self._extract_model_from_json()
+        self.logger.info("data loaded from disk")
+
+    def _extract_model_from_json(self) -> TransactionDetailModel:
+        if self.raw_data is None:
+            raise Exception("no raw_data found for model")
+        return TransactionDetailModel.model_validate(
+            self.raw_data[0]["data"]["account"]["brokerPortfolio"]["transactionDetails"]
+        )
+
+    @run_with_duration("fetch_duration")
+    def fetch(self) -> None:
+        if self.data is not None:
+            return
+
+        payload_raw = (
+            '[{"operationName":"getTransactionDetails","variables":{"personId":"'
+            + self.config.person_id
+            + '","transactionId":"'
+            + self.transaction_id
+            + '","portfolioId":"'
+            + self.config.portfolio_id
+            + '"},"query":"query getTransactionDetails($personId: ID\u0021, $transactionId: ID\u0021, $portfolioId: ID\u0021) {\\n  account(id: $personId) {\\n    id\\n    brokerPortfolio(id: $portfolioId) {\\n      id\\n      transactionDetails(id: $transactionId) {\\n        ...TransactionDetailsFragment\\n        __typename\\n      }\\n      __typename\\n    }\\n    __typename\\n  }\\n}\\n\\nfragment TransactionDetailsFragment on BrokerTransaction {\\n  id\\n  currency\\n  type\\n  documents {\\n    id\\n    url\\n    label\\n    __typename\\n  }\\n  lastEventDateTime\\n  isPending\\n  isCancellation\\n  security {\\n    ...SecurityNameOnlyFragment\\n    __typename\\n  }\\n  transactionReference\\n  ...SecurityTransactionDetailsFragment\\n  ...CashTransactionDetailsFragment\\n  ...NonTradeSecurityTransactionDetailsFragment\\n  ...EltifTransactionDetailsFragment\\n  __typename\\n}\\n\\nfragment SecurityNameOnlyFragment on Security {\\n  id\\n  name\\n  isin\\n  __typename\\n}\\n\\nfragment SecurityTransactionDetailsFragment on BrokerSecurityTransaction {\\n  id\\n  side\\n  status\\n  numberOfShares {\\n    filled\\n    total\\n    __typename\\n  }\\n  averagePrice\\n  totalAmount\\n  finalisationReason\\n  limitPrice\\n  stopPrice\\n  validUntil\\n  isCancellationRequested\\n  tradeTransactionAmounts {\\n    marketValuation\\n    taxAmount\\n    transactionFee\\n    venueFee\\n    cryptoSpreadFee\\n    __typename\\n  }\\n  tradingVenue\\n  fee\\n  transactionalFee\\n  taxes\\n  securityTransactionHistory: transactionHistory {\\n    state\\n    timestamp\\n    numberOfShares {\\n      filled\\n      total\\n      __typename\\n    }\\n    executionPrice\\n    __typename\\n  }\\n  orderKind\\n  __typename\\n}\\n\\nfragment CashTransactionDetailsFragment on BrokerCashTransaction {\\n  cashTransactionType\\n  amount\\n  description\\n  cashTransactionHistory: transactionHistory {\\n    state\\n    timestamp\\n    __typename\\n  }\\n  nonTradeSecurity: security {\\n    ...SecurityNameOnlyFragment\\n    __typename\\n  }\\n  sddiDetails {\\n    fee\\n    grossAmount\\n    __typename\\n  }\\n  taxDetails {\\n    grossAmount\\n    taxAmount\\n    __typename\\n  }\\n  __typename\\n}\\n\\nfragment NonTradeSecurityTransactionDetailsFragment on BrokerNonTradeSecurityTransaction {\\n  isin\\n  nonTradeSecurityTransactionType\\n  quantity\\n  nonTradeAveragePrice: averagePrice\\n  nonTradeSecurityAmount: totalAmount\\n  description\\n  nonTradeSecurityTransactionHistory: transactionHistory {\\n    state\\n    timestamp\\n    __typename\\n  }\\n  nonTradeSecurity: security {\\n    ...SecurityNameOnlyFragment\\n    __typename\\n  }\\n  __typename\\n}\\n\\nfragment EltifTransactionDetailsFragment on BrokerEltifTransaction {\\n  status\\n  side\\n  orderKind\\n  amount\\n  finalisationReason\\n  eltifQuantity\\n  executionPrice\\n  executionDate\\n  earliestSellDate\\n  marketValuation\\n  cancelableDetails {\\n    daysLeft\\n    isCancelable\\n    __typename\\n  }\\n  isMultipleOrdersCancellation\\n  tradingVenue\\n  transactionHistory {\\n    state\\n    amount\\n    eltifQuantity\\n    executionPrice\\n    time {\\n      epochSecond\\n      __typename\\n    }\\n    __typename\\n  }\\n  __typename\\n}"}]'
+        )
+
+        resp = requests.post(
+            self.config.url,
+            headers=self.config.headers,
+            cookies=self.config.cookies,
+            data=payload_raw,
+        )
+        self.raw_data = json.loads(resp.text)
+        self.data = self._extract_model_from_json()
+
+    @run_with_duration("save_duration")
+    def save(self) -> None:
+        file_path = self.get_file_path()
+        save_path = os.path.dirname(file_path)
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        with open(file_path, "w", encoding="utf-8") as fw:
+            json.dump(self.raw_data, fw, indent=2, ensure_ascii=False)
+
+    def stats(self) -> str:
+        return f"durations = ( fetch = {self.fetch_duration:.2f}s, save = {self.save_duration:.2f}s )"
+
+
+class _TransactionsPageLoggerAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        page_no = self.extra["page_no"] if self.extra is not None else "UNKNOWN"
+        return f"[txns_page {page_no}] {msg}", kwargs
+
+
+class _TransactionsPage:
+    page_number: int
+    cursor: str
+    config: Config
+    logger: logging.LoggerAdapter
+    data: Optional[TransactionsPageModel]
+    raw_data: Optional[Any]
+    fetch_duration: float
+    save_duration: float
+
     def __init__(
         self,
         page_number: int,
         cursor: Optional[str],
-        config: SourceScalableCapitalConfig,
+        config: Config,
         ignore_previous: bool = False,
     ):
         self.page_number = page_number
-        self.cursor = "null" if cursor == None else f'"{cursor}"'
-        self.file_name = f"page_{page_number:03d}.json"
-        save_path = os.path.join(config.output_path, "transactions")
-        self.file_path = os.path.join(save_path, self.file_name)
+        self.cursor = "null" if cursor is None else f'"{cursor}"'
         self.config = config
-        self.logger = ScalableCapitalSecuritiesTransactionsPageLoggerAdapter(
-            _module_logger, {"page_no": page_number}
+        self.logger = _TransactionsPageLoggerAdapter(
+            logger=_module_logger,
+            extra={"page_no": page_number},
         )
-
-        self.fetch_response = None
-        if not ignore_previous and os.path.exists(self.file_path):
-            with open(self.file_path, "r") as fr:
-                self.fetch_response = json.load(fr)
-            self.logger.info("data loaded from disk")
-
+        self.data = None
+        self.raw_data = None
         self.fetch_duration = 0.0
         self.save_duration = 0.0
 
+        if not ignore_previous:
+            self.__load_cached_data()
+
+    def get_file_path(self) -> str:
+        return os.path.join(
+            self.config.output_path,
+            "transactions",
+            f"page_{self.page_number:03d}.json",
+        )
+
+    def __load_cached_data(self) -> None:
+        file_path = self.get_file_path()
+        if not os.path.exists(file_path):
+            return
+        with open(file_path, "r") as fr:
+            self.raw_data = json.load(fr)
+            self.data = self._extract_model_from_json()
+        self.logger.info("data loaded from disk")
+
+    def _extract_model_from_json(self) -> TransactionsPageModel:
+        if self.raw_data is None:
+            raise Exception("no raw_data found for model")
+        return TransactionsPageModel.model_validate(
+            self.raw_data[0]["data"]["account"]["brokerPortfolio"]["moreTransactions"]
+        )
+
     @run_with_duration("fetch_duration")
     def fetch(self) -> Optional[str]:
-        if self.fetch_response != None:
+        if self.data is not None:
             return None
 
         payload_raw = (
@@ -161,112 +206,161 @@ class ScalableCapitalSecuritiesTransactionsPage:
             cookies=self.config.cookies,
             data=payload_raw,
         )
-        self.fetch_response = json.loads(resp.text)
+        self.raw_data = json.loads(resp.text)
+        self.data = self._extract_model_from_json()
 
-        cursor = self.fetch_response[0]["data"]["account"]["brokerPortfolio"][
-            "moreTransactions"
-        ]["cursor"]
-
-        return cursor
+        return self.data.cursor
 
     @run_with_duration("save_duration")
     def save(self):
-        save_path = os.path.dirname(self.file_path)
+        file_path = self.get_file_path()
+        save_path = os.path.dirname(file_path)
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        with open(self.file_path, "w", encoding="utf-8") as fw:
-            json.dump(self.fetch_response, fw, indent=2, ensure_ascii=False)
+        with open(file_path, "w", encoding="utf-8") as fw:
+            json.dump(self.raw_data, fw, indent=2, ensure_ascii=False)
 
-    def get_transaction_ids(self):
-        if not self.fetch_response:
+    def get_transaction_ids(self) -> List[str]:
+        if not self.data:
             raise RuntimeError("no fetched data found to get transaction IDs")
+        return [txn.id for txn in self.data.transactions]
 
-        transactions = self.fetch_response[0]["data"]["account"]["brokerPortfolio"][
-            "moreTransactions"
-        ]["transactions"]
-        return [txn["id"] for txn in transactions]
-
-    def has_diff_with_previous(self) -> bool:
-        if not self.fetch_response:
-            raise RuntimeError("no fetched data found for diff comparison")
-
-        if not os.path.exists(self.file_path):
-            return True
-
-        with open(self.file_path, "r") as fr:
-            previous_data = json.load(fr)
-
-        return self.fetch_response != previous_data
-
-    def stats(self):
+    def stats(self) -> str:
         return f"durations = ( fetch = {self.fetch_duration:.2f}s, save = {self.save_duration:.2f}s )"
 
 
-class TransactionLoggerAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        return f"[txn {self.extra['transaction_id']}] {msg}", kwargs
+class Orchestrator:
+    config: Config
+    logger: logging.Logger
 
-
-class ScalableCapitalSecuritiesTransaction:
-    def __init__(
-        self,
-        transaction_id: str,
-        config: SourceScalableCapitalConfig,
-        ignore_previous: bool = False,
-    ):
-        self.transaction_id = transaction_id
-        self.file_name = f"txn_{transaction_id}.json"
-        save_path = os.path.join(config.output_path, "data_points")
-        self.file_path = os.path.join(save_path, self.file_name)
+    def __init__(self, config: Config) -> None:
         self.config = config
+        self.logger = _module_logger
 
-        display_id = transaction_id
-        if len(transaction_id) > 13:
-            display_id = f"{transaction_id[:10]}...{transaction_id[-3:]}"
+    def fetch_and_save(self) -> None:
+        # transactions information
+        page_number: int = -1
+        cursor_next: Optional[str] = None
 
-        self.logger = TransactionLoggerAdapter(
-            _module_logger, {"transaction_id": display_id}
-        )
+        refetch_transactions_data = True
+        while True:
+            page_number += 1
 
-        self.fetch_response = None
-        if not ignore_previous and os.path.exists(self.file_path):
-            with open(self.file_path, "r") as fr:
-                self.fetch_response = json.load(fr)
-            self.logger.info("data loaded from disk")
+            page = _TransactionsPage(
+                page_number=page_number,
+                cursor=cursor_next,
+                config=self.config,
+                ignore_previous=refetch_transactions_data,
+            )
+            try:
+                cursor_next = page.fetch()
+            except Exception as e:
+                self.logger.error(
+                    f"error fetching transactions page {page_number}: {e}"
+                )
+                raise
 
-        self.fetch_duration = 0.0
-        self.save_duration = 0.0
+            if page_number == 0:
+                # check if all transactions in the first page, are already in disk.
+                # if so, we do not need to refetch anything anymore
 
-    @run_with_duration("fetch_duration")
-    def fetch(self) -> None:
-        if self.fetch_response != None:
-            return
+                data_not_found = False
+                for txn_id in page.get_transaction_ids():
+                    transaction = _Transaction(
+                        transaction_id=txn_id,
+                        config=self.config,
+                    )
 
-        payload_raw = (
-            '[{"operationName":"getTransactionDetails","variables":{"personId":"'
-            + self.config.person_id
-            + '","transactionId":"'
-            + self.transaction_id
-            + '","portfolioId":"'
-            + self.config.portfolio_id
-            + '"},"query":"query getTransactionDetails($personId: ID\u0021, $transactionId: ID\u0021, $portfolioId: ID\u0021) {\\n  account(id: $personId) {\\n    id\\n    brokerPortfolio(id: $portfolioId) {\\n      id\\n      transactionDetails(id: $transactionId) {\\n        ...TransactionDetailsFragment\\n        __typename\\n      }\\n      __typename\\n    }\\n    __typename\\n  }\\n}\\n\\nfragment TransactionDetailsFragment on BrokerTransaction {\\n  id\\n  currency\\n  type\\n  documents {\\n    id\\n    url\\n    label\\n    __typename\\n  }\\n  lastEventDateTime\\n  isPending\\n  isCancellation\\n  security {\\n    ...SecurityNameOnlyFragment\\n    __typename\\n  }\\n  transactionReference\\n  ...SecurityTransactionDetailsFragment\\n  ...CashTransactionDetailsFragment\\n  ...NonTradeSecurityTransactionDetailsFragment\\n  ...EltifTransactionDetailsFragment\\n  __typename\\n}\\n\\nfragment SecurityNameOnlyFragment on Security {\\n  id\\n  name\\n  isin\\n  __typename\\n}\\n\\nfragment SecurityTransactionDetailsFragment on BrokerSecurityTransaction {\\n  id\\n  side\\n  status\\n  numberOfShares {\\n    filled\\n    total\\n    __typename\\n  }\\n  averagePrice\\n  totalAmount\\n  finalisationReason\\n  limitPrice\\n  stopPrice\\n  validUntil\\n  isCancellationRequested\\n  tradeTransactionAmounts {\\n    marketValuation\\n    taxAmount\\n    transactionFee\\n    venueFee\\n    cryptoSpreadFee\\n    __typename\\n  }\\n  tradingVenue\\n  fee\\n  transactionalFee\\n  taxes\\n  securityTransactionHistory: transactionHistory {\\n    state\\n    timestamp\\n    numberOfShares {\\n      filled\\n      total\\n      __typename\\n    }\\n    executionPrice\\n    __typename\\n  }\\n  orderKind\\n  __typename\\n}\\n\\nfragment CashTransactionDetailsFragment on BrokerCashTransaction {\\n  cashTransactionType\\n  amount\\n  description\\n  cashTransactionHistory: transactionHistory {\\n    state\\n    timestamp\\n    __typename\\n  }\\n  nonTradeSecurity: security {\\n    ...SecurityNameOnlyFragment\\n    __typename\\n  }\\n  sddiDetails {\\n    fee\\n    grossAmount\\n    __typename\\n  }\\n  taxDetails {\\n    grossAmount\\n    taxAmount\\n    __typename\\n  }\\n  __typename\\n}\\n\\nfragment NonTradeSecurityTransactionDetailsFragment on BrokerNonTradeSecurityTransaction {\\n  isin\\n  nonTradeSecurityTransactionType\\n  quantity\\n  nonTradeAveragePrice: averagePrice\\n  nonTradeSecurityAmount: totalAmount\\n  description\\n  nonTradeSecurityTransactionHistory: transactionHistory {\\n    state\\n    timestamp\\n    __typename\\n  }\\n  nonTradeSecurity: security {\\n    ...SecurityNameOnlyFragment\\n    __typename\\n  }\\n  __typename\\n}\\n\\nfragment EltifTransactionDetailsFragment on BrokerEltifTransaction {\\n  status\\n  side\\n  orderKind\\n  amount\\n  finalisationReason\\n  eltifQuantity\\n  executionPrice\\n  executionDate\\n  earliestSellDate\\n  marketValuation\\n  cancelableDetails {\\n    daysLeft\\n    isCancelable\\n    __typename\\n  }\\n  isMultipleOrdersCancellation\\n  tradingVenue\\n  transactionHistory {\\n    state\\n    amount\\n    eltifQuantity\\n    executionPrice\\n    time {\\n      epochSecond\\n      __typename\\n    }\\n    __typename\\n  }\\n  __typename\\n}"}]'
-        )
+                    if transaction.data is None:
+                        data_not_found = True
+                        break
 
-        resp = requests.post(
-            self.config.url,
-            headers=self.config.headers,
-            cookies=self.config.cookies,
-            data=payload_raw,
-        )
-        self.fetch_response = json.loads(resp.text)
+                # if even one of them has empty transaction data, then continue refetch
+                refetch_transactions_data = data_not_found
 
-    @run_with_duration("save_duration")
-    def save(self):
-        save_path = os.path.dirname(self.file_path)
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-        with open(self.file_path, "w", encoding="utf-8") as fw:
-            json.dump(self.fetch_response, fw, indent=2, ensure_ascii=False)
+                if not data_not_found:
+                    self.logger.info(
+                        "no new transactions since last fetch, nothing more to do for this step"
+                    )
+                    break
+                else:
+                    # If the first page is different (or no previous file), then changes detected
+                    self.logger.info(
+                        "changes detected or no previous transactions data"
+                    )
+                    transactions_dir = os.path.dirname(page.get_file_path())
+                    if os.path.exists(transactions_dir):
+                        self.logger.info(
+                            f"clearing old transaction files from: {transactions_dir}"
+                        )
+                        shutil.rmtree(transactions_dir)
 
-    def stats(self):
-        return f"durations = ( fetch = {self.fetch_duration:.2f}s, save = {self.save_duration:.2f}s )"
+            try:
+                page.save()
+            except Exception as e:
+                self.logger.error(f"error saving transactions page {page_number}: {e}")
+                raise
+
+            # page stats
+            page.logger.info(page.stats())
+
+            if cursor_next is None:
+                break
+
+        # fetch all transaction included in all the pages
+        page_number = -1
+        while True:
+            page_number += 1
+
+            page = _TransactionsPage(
+                page_number=page_number,
+                cursor=cursor_next,
+                config=self.config,
+            )
+            if page.data is None:
+                # since we should have already fetched all the pages, if there is no more data
+                # it would mean that there are no pages
+                break
+
+            for txn_id in page.get_transaction_ids():
+                transaction = _Transaction(
+                    transaction_id=txn_id,
+                    config=self.config,
+                )
+                try:
+                    transaction.fetch()
+                except Exception as e:
+                    self.logger.error(f"error fetching transaction {txn_id}: {e}")
+                    raise
+                try:
+                    transaction.save()
+                except Exception as e:
+                    self.logger.error(f"error saving transaction {txn_id}: {e}")
+                    raise
+
+                # transaction stats
+                transaction.logger.info(transaction.stats())
+
+    def get_transactions_details(self) -> Iterator[TransactionDetailModel]:
+        page_number = -1
+        while True:
+            page_number += 1
+
+            page = _TransactionsPage(
+                page_number=page_number,
+                cursor=None,
+                config=self.config,
+            )
+            if page.data is None:
+                # since we should have already fetched all the pages, if there is no more data
+                # it would mean that there are no pages
+                break
+
+            for txn_id in page.get_transaction_ids():
+                transaction = _Transaction(
+                    transaction_id=txn_id,
+                    config=self.config,
+                )
+                if transaction.data is None:
+                    raise Exception(f"no model data found for transaction {txn_id}")
+                yield transaction.data

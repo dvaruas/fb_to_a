@@ -1,8 +1,16 @@
-import json
 from typing import Self
 
+import utils
 
-class SourceScalableCapitalConfig:
+
+class Config:
+    url: str
+    person_id: str
+    portfolio_id: str
+    output_path: str
+    cookies: dict[str, str]
+    headers: dict[str, str]
+
     def __init__(
         self,
         url: str,
@@ -42,6 +50,4 @@ class SourceScalableCapitalConfig:
 
     @classmethod
     def from_json(cls, file_path: str) -> Self:
-        with open(file_path, "r") as fr:
-            config_data = json.load(fr)
-        return cls(**config_data)
+        return utils.load_config_from_json(cls, file_path=file_path)
