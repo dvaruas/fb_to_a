@@ -1,15 +1,28 @@
 import argparse
 import logging
+import pathlib
 
+import pydantic
+
+import destination.params
+import destination.parqet
+import handlers
+import source.params
 import source.scalable
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "-c",
-        "--config",
+        "-s",
+        "--source",
         required=True,
-        help="config file location",
+        help="source params file location",
+    )
+    parser.add_argument(
+        "-d",
+        "--destination",
+        required=True,
+        help="destination params file location",
     )
     parser.add_argument(
         "-v",
@@ -26,6 +39,16 @@ if __name__ == "__main__":
         format="%(asctime)s - %(levelname)s - %(name)s:%(funcName)s - %(message)s",
     )
 
-    config = source.scalable.Config.from_json(args.config)
+    source_params = pydantic.TypeAdapter(source.params.AnyParamsModel).validate_json(
+        pathlib.Path(args.source).read_bytes()
+    )
+    destination_params = pydantic.TypeAdapter(
+        destination.params.AnyParamsModel
+    ).validate_json(pathlib.Path(args.destination).read_bytes())
 
-    source.scalable.Orchestrator(config).fetch_and_save()
+    if isinstance(source_params, source.scalable.params.Params) and isinstance(
+        destination_params, destination.parqet.params.Params
+    ):
+        handlers.from_scalable_to_parqet(source_params, destination_params)
+    else:
+        raise ValueError("no handler found for the given source and destination params")

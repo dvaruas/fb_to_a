@@ -2,7 +2,7 @@
 
 # eg: export DATA_DIR=./raw_data/data_points; ./scripts/scalable/unique_values.sh
 
-field_name=".data.account.brokerPortfolio.transactionDetails.finalisationReason"
+field_name=".data.account.brokerPortfolio.transactionDetails.side"
 
 # Declare an associative array to store the first file for each type
 declare -A first_occurrence
