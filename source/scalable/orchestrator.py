@@ -9,6 +9,10 @@ import pydantic
 import requests
 
 from source.scalable.config import Config
+from source.scalable.loggers import (
+    TransactionLoggerAdapter,
+    TransactionsPageLoggerAdapter,
+)
 from source.scalable.models import (
     AnyTransactionDetailModel,
     TransactionDetailModel,
@@ -17,16 +21,6 @@ from source.scalable.models import (
 from utils.with_duration import run_with_duration
 
 transactions_page_size = 200
-
-_module_logger = logging.getLogger(__name__)
-
-
-class _TransactionLoggerAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        transaction_id = (
-            self.extra["transaction_id"] if self.extra is not None else "UNKNOWN"
-        )
-        return f"[txn {transaction_id}] {msg}", kwargs
 
 
 class _Transaction:
@@ -43,15 +37,8 @@ class _Transaction:
     ):
         self.transaction_id = transaction_id
         self.config = config
-        self.logger = _TransactionLoggerAdapter(
-            logger=_module_logger,
-            extra={
-                "transaction_id": (
-                    transaction_id
-                    if len(transaction_id) <= 13
-                    else f"{transaction_id[:10]}...{transaction_id[-3:]}"
-                )
-            },
+        self.logger = TransactionLoggerAdapter.get_logger(
+            logging.getLogger(__name__), transaction_id
         )
         self.data = None
         self.raw_data = None
@@ -75,7 +62,7 @@ class _Transaction:
         with open(file_path, "r") as fr:
             self.raw_data = json.load(fr)
             self.data = self._extract_model_from_json()
-        self.logger.info("data loaded from disk")
+        self.logger.debug("data loaded from disk")
 
     def _extract_model_from_json(self) -> TransactionDetailModel:
         if self.raw_data is None:
@@ -125,12 +112,6 @@ class _Transaction:
         return f"durations = ( fetch = {self.fetch_duration:.2f}s, save = {self.save_duration:.2f}s )"
 
 
-class _TransactionsPageLoggerAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        page_no = self.extra["page_no"] if self.extra is not None else "UNKNOWN"
-        return f"[txns_page {page_no}] {msg}", kwargs
-
-
 class _TransactionsPage:
     page_number: int
     cursor: str
@@ -151,9 +132,8 @@ class _TransactionsPage:
         self.page_number = page_number
         self.cursor = "null" if cursor is None else f'"{cursor}"'
         self.config = config
-        self.logger = _TransactionsPageLoggerAdapter(
-            logger=_module_logger,
-            extra={"page_no": page_number},
+        self.logger = TransactionsPageLoggerAdapter.get_logger(
+            logging.getLogger(__name__), page_number
         )
         self.data = None
         self.raw_data = None
@@ -177,7 +157,7 @@ class _TransactionsPage:
         with open(file_path, "r") as fr:
             self.raw_data = json.load(fr)
             self.data = self._extract_model_from_json()
-        self.logger.info("data loaded from disk")
+        self.logger.debug("data loaded from disk")
 
     def _extract_model_from_json(self) -> TransactionsPageModel:
         if self.raw_data is None:
@@ -238,7 +218,7 @@ class Orchestrator:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.logger = _module_logger
+        self.logger = logging.getLogger(__name__)
 
     def fetch_and_save(self) -> None:
         # transactions information
@@ -288,12 +268,12 @@ class Orchestrator:
                     break
                 else:
                     # If the first page is different (or no previous file), then changes detected
-                    self.logger.info(
+                    self.logger.debug(
                         "changes detected or no previous transactions data"
                     )
                     transactions_dir = page.get_file_path().parent
                     if transactions_dir.exists():
-                        self.logger.info(
+                        self.logger.debug(
                             f"clearing old transaction files from: {transactions_dir}"
                         )
                         shutil.rmtree(transactions_dir)

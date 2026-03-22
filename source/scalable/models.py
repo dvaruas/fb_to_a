@@ -16,6 +16,23 @@ class TransactionSide(str, enum.Enum):
     SELL = "SELL"
 
 
+class TransactionStatus(str, enum.Enum):
+    FINAL_FILL = "FINAL_FILL"
+    FINAL_NO_FILL = "FINAL_NO_FILL"
+    REQUESTED = "REQUESTED"
+
+
+class CashTransactionType(str, enum.Enum):
+    DEPOSIT = "DEPOSIT"
+    WITHDRAWAL = "WITHDRAWAL"
+    INTEREST = "INTEREST"
+    DISTRIBUTION = "DISTRIBUTION"
+    FEE = "FEE"
+    SWAP_OUT = "SWAP_OUT"
+    TAX = "TAX"
+    TAX_RETURN = "TAX_RETURN"
+
+
 class TransactionDetailModel(pydantic.BaseModel):
     id: str
     type: TransactionType
@@ -41,6 +58,9 @@ class SecuritiesTransactionDetailModel(TransactionDetailModel):
     )
     total_amount: typing.Optional[float] = pydantic.Field(
         default=None, validation_alias=pydantic.AliasPath("totalAmount")
+    )
+    status: typing.Optional[TransactionStatus] = pydantic.Field(
+        default=None, validation_alias=pydantic.AliasPath("status")
     )
 
     # Fees
@@ -78,6 +98,26 @@ class SecuritiesTransactionDetailModel(TransactionDetailModel):
 
 class CashTransactionDetailModel(TransactionDetailModel):
     type: typing.Literal[TransactionType.CASH]
+
+    # Details
+    isin: typing.Optional[str] = pydantic.Field(
+        default=None, validation_alias=pydantic.AliasPath("security", "isin")
+    )
+    transaction_type: CashTransactionType = pydantic.Field(
+        default=None, validation_alias=pydantic.AliasPath("cashTransactionType")
+    )
+
+    # Amount
+    amount: float = pydantic.Field(validation_alias=pydantic.AliasPath("amount"))
+    tax_gross_amount: typing.Optional[float] = pydantic.Field(
+        default=None, validation_alias=pydantic.AliasPath("taxDetails", "grossAmount")
+    )
+
+    # Tax
+    tax: typing.Optional[float] = pydantic.Field(
+        default=0.0,
+        validation_alias=pydantic.AliasPath("taxDetails", "taxAmount"),
+    )
 
 
 class NonTradeSecurityTransactionDetailModel(TransactionDetailModel):
