@@ -61,11 +61,6 @@ if __name__ == "__main__":
         parser.error("source params must be provided when fetch is true")
 
     if args.fetch:
-        if isinstance(source_params, source.scalable.Params):
-            handlers.fetch_scalable(source_params)
+        handlers.fetch(source_params)
 
-    # scalable -> parqet
-    if isinstance(source_params, source.scalable.Params) and isinstance(
-        destination_params, destination.parqet.Params
-    ):
-        handlers.from_scalable_to_parqet(source_params, destination_params)
+    handlers.from_source_to_destination(source_params, destination_params)
