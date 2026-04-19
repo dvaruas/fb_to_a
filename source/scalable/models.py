@@ -31,6 +31,7 @@ class CashTransactionType(str, enum.Enum):
     SWAP_OUT = "SWAP_OUT"
     TAX = "TAX"
     TAX_RETURN = "TAX_RETURN"
+    CASH_TRANSFER_OUT = "CASH_TRANSFER_OUT"
 
 
 class TransactionDetailModel(pydantic.BaseModel):
