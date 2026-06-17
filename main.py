@@ -35,8 +35,21 @@ if __name__ == "__main__":
         action="store_true",
         help="fetch data from source, source params are required for this",
     )
+    parser.add_argument(
+        "-m",
+        "--migration",
+        action="store_true",
+        help="enable migration mode: create a new csv file in the destination with a timestamp prefix containing only new fetched data",
+    )
 
     args = parser.parse_args()
+
+    # param validation
+    if args.source is None or args.destination is None:
+        parser.error("source and destination params must be provided")
+
+    if args.migration:
+        args.fetch = True
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
@@ -46,21 +59,35 @@ if __name__ == "__main__":
     )
 
     source_params: typing.Optional[pydantic.TypeAdapter] = None
-    if args.source is not None:
+    source_path = pathlib.Path(args.source)
+    if not source_path.exists():
+        parser.error(f"source params file not found: {args.source}")
+    try:
         source_params = pydantic.TypeAdapter(
             source.params.AnyParamsModel
-        ).validate_json(pathlib.Path(args.source).read_bytes())
+        ).validate_json(source_path.read_bytes())
+    except (pydantic.ValidationError, ValueError) as e:
+        parser.error(f"invalid source params file: {e}")
+
     destination_params: typing.Optional[pydantic.TypeAdapter] = None
-    if args.destination is not None:
+    dest_path = pathlib.Path(args.destination)
+    if not dest_path.exists():
+        parser.error(f"destination params file not found: {args.destination}")
+    try:
         destination_params = pydantic.TypeAdapter(
             destination.params.AnyParamsModel
-        ).validate_json(pathlib.Path(args.destination).read_bytes())
+        ).validate_json(dest_path.read_bytes())
+    except (pydantic.ValidationError, ValueError) as e:
+        parser.error(f"invalid destination params file: {e}")
 
-    # if fetch is true, then source_params must be provided
-    if args.fetch and source_params is None:
-        parser.error("source params must be provided when fetch is true")
-
+    new_txn_ids: typing.Optional[typing.List[str]] = None
     if args.fetch:
-        handlers.fetch(source_params)
+        new_txn_ids = handlers.fetch(source_params)
 
-    handlers.from_source_to_destination(source_params, destination_params)
+    if destination_params is not None:
+        handlers.from_source_to_destination(
+            source_params,
+            destination_params,
+            migration_mode=args.migration,
+            new_txn_ids=new_txn_ids,
+        )

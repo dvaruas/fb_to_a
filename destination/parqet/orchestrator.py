@@ -1,4 +1,5 @@
 import csv
+import datetime
 import logging
 import os
 import typing
@@ -30,32 +31,53 @@ class Orchestrator:
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-    def from_source_scalable(self, source_orchestrator: source.scalable.Orchestrator):
-        if os.path.exists(self.config.params.output_path):
-            os.remove(self.config.params.output_path)
+    def from_source_scalable(
+        self,
+        source_orchestrator: source.scalable.Orchestrator,
+        migration_mode: bool = False,
+        new_txn_ids: typing.Optional[typing.List[str]] = None,
+    ):
+        skipped = 0
+        processed = 0
+        records_to_write = []
 
-        with open(
-            self.config.params.output_path, "w", newline="", encoding="utf-8"
-        ) as fw:
+        for transaction_detail in source_orchestrator.get_transactions_details():
+            if migration_mode:
+                if new_txn_ids is None or transaction_detail.id not in new_txn_ids:
+                    continue
+
+            transaction = from_scalable_transaction(transaction_detail)
+            if transaction is None:
+                skipped += 1
+                continue
+
+            row = transaction.as_record()
+            records_to_write.append(row)
+            processed += 1
+
+        if migration_mode and processed == 0:
+            self.logger.warning(
+                "no new transactions found during migration, no file created"
+            )
+            return
+
+        output_path = self.config.params.output_path
+        if migration_mode:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S_")
+            output_path = output_path.with_name(f"{timestamp}{output_path.name}")
+        else:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+
+        with open(output_path, "w", newline="", encoding="utf-8") as fw:
             writer = csv.DictWriter(
                 fw,
                 fieldnames=Orchestrator._field_names,
             )
             writer.writeheader()
-
-            skipped = 0
-            processed = 0
-
-            for transaction_detail in source_orchestrator.get_transactions_details():
-                transaction = from_scalable_transaction(transaction_detail)
-                if transaction is None:
-                    skipped += 1
-                    continue
-
-                row = transaction.as_record()
+            for row in records_to_write:
                 writer.writerow(row)
-                processed += 1
 
-            self.logger.info(
-                f"processed {processed} transactions and skipped {skipped} transactions"
-            )
+        self.logger.info(
+            f"processed {processed} transactions and skipped {skipped} transactions"
+        )

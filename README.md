@@ -15,8 +15,8 @@ Helper tool to migrate financial data from one platform to another.
 
 * [one-time] install [uv](https://github.com/astral-sh/uv)
 * [one-time] set up project using `uv sync`
-* [one-time] set up data directory. 
-  * The default is `$PWD/data`. 
+* [one-time] set up data directory.
+  * The default is `$PWD/data`.
   * It should contain `source.params.json` and `destination.params.json` files.
     * `source.params.json` contains the source platform credentials and other configuration.
     * `destination.params.json` contains the destination platform credentials and other configuration.

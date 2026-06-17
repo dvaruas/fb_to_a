@@ -220,7 +220,7 @@ class Orchestrator:
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-    def fetch_and_save(self) -> None:
+    def fetch_and_save(self) -> typing.List[str]:
         # transactions information
         page_number: int = -1
         cursor_next: typing.Optional[str] = None
@@ -290,6 +290,7 @@ class Orchestrator:
             if cursor_next is None:
                 break
 
+        newly_fetched_ids = []
         # fetch all transaction included in all the pages
         page_number = -1
         while True:
@@ -310,6 +311,7 @@ class Orchestrator:
                     transaction_id=txn_id,
                     config=self.config,
                 )
+                is_new = transaction.data is None
                 try:
                     transaction.fetch()
                 except Exception as e:
@@ -323,6 +325,10 @@ class Orchestrator:
 
                 # transaction stats
                 transaction.logger.info(transaction.stats())
+                if is_new:
+                    newly_fetched_ids.append(txn_id)
+
+        return newly_fetched_ids
 
     def get_transactions_details(self) -> typing.Iterator[TransactionDetailModel]:
         page_number = -1
