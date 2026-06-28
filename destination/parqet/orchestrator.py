@@ -2,6 +2,7 @@ import csv
 import datetime
 import logging
 import os
+import re
 import typing
 
 import source.scalable
@@ -34,17 +35,20 @@ class Orchestrator:
     def from_source_scalable(
         self,
         source_orchestrator: source.scalable.Orchestrator,
-        migration_mode: bool = False,
-        new_txn_ids: typing.Optional[typing.List[str]] = None,
+        new_txn_ids: typing.List[str],
     ):
+        output_dir = self.config.params.output_path
+
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+
         skipped = 0
         processed = 0
         records_to_write = []
 
         for transaction_detail in source_orchestrator.get_transactions_details():
-            if migration_mode:
-                if new_txn_ids is None or transaction_detail.id not in new_txn_ids:
-                    continue
+            if transaction_detail.id not in new_txn_ids:
+                continue
 
             transaction = from_scalable_transaction(transaction_detail)
             if transaction is None:
@@ -55,19 +59,14 @@ class Orchestrator:
             records_to_write.append(row)
             processed += 1
 
-        if migration_mode and processed == 0:
+        if processed == 0:
             self.logger.warning(
                 "no new transactions found during migration, no file created"
             )
             return
 
-        output_path = self.config.params.output_path
-        if migration_mode:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S_")
-            output_path = output_path.with_name(f"{timestamp}{output_path.name}")
-        else:
-            if os.path.exists(output_path):
-                os.remove(output_path)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        output_path = output_dir.joinpath(f"{timestamp}_parqet.csv")
 
         with open(output_path, "w", newline="", encoding="utf-8") as fw:
             writer = csv.DictWriter(
@@ -75,8 +74,7 @@ class Orchestrator:
                 fieldnames=Orchestrator._field_names,
             )
             writer.writeheader()
-            for row in records_to_write:
-                writer.writerow(row)
+            writer.writerows(records_to_write)
 
         self.logger.info(
             f"processed {processed} transactions and skipped {skipped} transactions"

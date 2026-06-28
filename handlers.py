@@ -20,8 +20,7 @@ def fetch(source_params: source.params.Params) -> typing.Optional[typing.List[st
 def from_source_to_destination(
     source_params: source.params.Params,
     destination_params: destination.params.Params,
-    migration_mode: bool = False,
-    new_txn_ids: typing.Optional[typing.List[str]] = None,
+    new_txn_ids: typing.List[str],
 ):
     if isinstance(source_params, source.scalable.Params) and isinstance(
         destination_params, destination.parqet.Params
@@ -29,7 +28,6 @@ def from_source_to_destination(
         from_scalable_to_parqet(
             source_params,
             destination_params,
-            migration_mode=migration_mode,
             new_txn_ids=new_txn_ids,
         )
     else:
@@ -52,8 +50,7 @@ def fetch_scalable(source_params: source.scalable.Params) -> typing.List[str]:
 def from_scalable_to_parqet(
     source_params: source.scalable.Params,
     destination_params: destination.parqet.Params,
-    migration_mode: bool = False,
-    new_txn_ids: typing.Optional[typing.List[str]] = None,
+    new_txn_ids: typing.List[str],
 ):
     _module_logger.info("converting data from scalable to parqet")
     source_config = source.scalable.Config(source_params)
@@ -62,6 +59,5 @@ def from_scalable_to_parqet(
     destination_orchestrator = destination.parqet.Orchestrator(destination_config)
     destination_orchestrator.from_source_scalable(
         source_orchestrator,
-        migration_mode=migration_mode,
         new_txn_ids=new_txn_ids,
     )
